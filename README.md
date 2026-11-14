@@ -8,6 +8,7 @@ Um painel de emoji no estilo do Windows (`Win + .`) para o GNOME Shell no Waylan
 - **Pesquisa em português e inglês**: é só começar a digitar (`fogo`, `fire`, `kkk`, `brasil`…)
 - **Enter insere o emoji destacado**: o primeiro resultado da busca ou, com a busca vazia, o mais recente. Aperte várias vezes para repetir; enquanto o painel está aberto o Enter não vai para o app
 - **Cada clique insere o emoji direto** no app em que você está digitando, e o painel continua aberto
+- **Keyboard:** arrows move the selection; Home/End jump to the first/last emoji; Tab/Shift+Tab switch categories; Enter inserts; Esc closes
 - **Clique fora ou Esc** fecha
 - Abas com os emojis usados recentemente e todas as categorias; passe o mouse para ver o nome do emoji
 

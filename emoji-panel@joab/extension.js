@@ -17,6 +17,7 @@ import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+import {moveGridIndex, resolvePanelKey} from './navigation.js';
 
 const COLUMNS = 9;
 const MAX_RECENT = 36;
@@ -27,6 +28,23 @@ const FOCUS_WAIT_US = 400 * 1000;
 const FOCUS_SETTLE_US = 60 * 1000;
 const DEFAULT_RECENT = ['😂', '❤️', '👍', '😭', '🙏', '😍', '🔥', '🥰', '😊', '🤣', '😅', '👀'];
 const TAB_ICONS = ['😀', '👋', '🐻', '🍔', '✈️', '⚽', '💡', '🔣', '🏁'];
+const KEY_NAMES = new Map([
+    [Clutter.KEY_Left, 'Left'],
+    [Clutter.KEY_Right, 'Right'],
+    [Clutter.KEY_Up, 'Up'],
+    [Clutter.KEY_Down, 'Down'],
+    [Clutter.KEY_KP_Left, 'KP_Left'],
+    [Clutter.KEY_KP_Right, 'KP_Right'],
+    [Clutter.KEY_KP_Up, 'KP_Up'],
+    [Clutter.KEY_KP_Down, 'KP_Down'],
+    [Clutter.KEY_Escape, 'Escape'],
+    [Clutter.KEY_Return, 'Return'],
+    [Clutter.KEY_KP_Enter, 'KP_Enter'],
+    [Clutter.KEY_Tab, 'Tab'],
+    [Clutter.KEY_ISO_Left_Tab, 'ISO_Left_Tab'],
+    [Clutter.KEY_Home, 'Home'],
+    [Clutter.KEY_End, 'End'],
+]);
 const STRINGS = {
     pt: {
         search: 'Pesquisar emoji',
@@ -93,6 +111,8 @@ export default class EmojiPanelExtension extends Extension {
         this._keyboard = seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
 
         this._buildPanel();
+        this._stageKeyEventId = global.stage.connect('captured-event', (_stage, event) =>
+            this._handleCapturedKey(event));
 
         Main.inputMethod.connectObject('cursor-location-changed', (_im, rect) => {
             this._cursorRect = {
@@ -110,6 +130,10 @@ export default class EmojiPanelExtension extends Extension {
     disable() {
         this._hide();
         Main.wm.removeKeybinding('toggle-panel');
+        if (this._stageKeyEventId) {
+            global.stage.disconnect(this._stageKeyEventId);
+            this._stageKeyEventId = null;
+        }
         Main.inputMethod.disconnectObject(this);
         Main.overview.disconnectObject(this);
         for (const id of this._sources)
@@ -209,6 +233,7 @@ export default class EmojiPanelExtension extends Extension {
     _buildGrid(emojis) {
         const box = new St.BoxLayout({...VERTICAL, style_class: 'emoji-panel-grid'});
         box.firstButton = null;
+        box.buttons = [];
         for (let i = 0; i < emojis.length; i += COLUMNS) {
             const row = new St.BoxLayout({style_class: 'emoji-panel-row'});
             for (const emoji of emojis.slice(i, i + COLUMNS)) {
@@ -219,6 +244,7 @@ export default class EmojiPanelExtension extends Extension {
                 });
                 button.emoji = emoji;
                 box.firstButton ??= button;
+                box.buttons.push(button);
                 button.connect('clicked', () => this._insert(emoji));
                 button.connect('notify::hover', () => {
                     this._title.text = button.hover
@@ -252,8 +278,7 @@ export default class EmojiPanelExtension extends Extension {
         const old = this._scroll.child;
         if (old === grid)
             return;
-        this._selected?.remove_style_class_name('selected');
-        this._selected = null;
+        this._setSelected(null);
         // Category grids are cached, so detach them without destroying.
         if (old)
             this._scroll.remove_child(old);
@@ -264,10 +289,88 @@ export default class EmojiPanelExtension extends Extension {
         if (grid)
             this._scroll.child = grid;
         // Enter inserts the first emoji shown, so that is the one highlighted.
-        this._selected = grid?.firstButton ?? null;
-        this._selected?.add_style_class_name('selected');
+        this._setSelected(grid?.firstButton ?? null);
         const adjustment = this._scroll.vadjustment ?? this._scroll.vscroll?.adjustment;
         adjustment?.set_value(0);
+    }
+
+    _setSelected(button) {
+        this._selected?.remove_style_class_name('selected');
+        this._selected = button;
+        this._selected?.add_style_class_name('selected');
+    }
+
+    _moveSelection(dx, dy) {
+        const buttons = this._scroll.child?.buttons ?? [];
+        const nextIndex = moveGridIndex(
+            buttons.indexOf(this._selected), buttons.length, COLUMNS, dx, dy);
+        if (nextIndex < 0)
+            return;
+        this._setSelected(buttons[nextIndex]);
+        this._ensureSelectedVisible(buttons[nextIndex]);
+    }
+
+    _handleCapturedKey(event) {
+        if (!this._panel?.visible || event.type() !== Clutter.EventType.KEY_PRESS)
+            return Clutter.EVENT_PROPAGATE;
+
+        const key = KEY_NAMES.get(event.get_key_symbol());
+        const state = event.get_state();
+        const systemModifiers = Clutter.ModifierType.CONTROL_MASK |
+            Clutter.ModifierType.ALT_MASK | Clutter.ModifierType.SUPER_MASK;
+        const decision = resolvePanelKey(key, {
+            hasSystemModifier: Boolean(state & systemModifiers),
+            shift: Boolean(state & Clutter.ModifierType.SHIFT_MASK),
+            searchFocused: this._searchFocused(),
+            hasSelection: Boolean(this._selected),
+            hasItems: Boolean(this._scroll.child?.buttons?.length),
+        });
+
+        if (decision.action === 'close') {
+            this._hide();
+            return Clutter.EVENT_STOP;
+        }
+
+        if (decision.action === 'insert') {
+            this._insertSelected();
+            return Clutter.EVENT_STOP;
+        }
+
+        if (decision.action === 'switch-tab') {
+            this._entry.text = '';
+            this._selectTab((this._currentTab + decision.step + this._tabs.length) % this._tabs.length);
+            this._entry.grab_key_focus();
+            return Clutter.EVENT_STOP;
+        }
+
+        if (decision.action === 'move') {
+            this._moveSelection(decision.dx, decision.dy);
+            return Clutter.EVENT_STOP;
+        }
+
+        if (decision.action === 'jump') {
+            const buttons = this._scroll.child?.buttons ?? [];
+            const button = decision.edge === 'first' ? buttons[0] : buttons[buttons.length - 1];
+            this._setSelected(button);
+            this._ensureSelectedVisible(button);
+            return Clutter.EVENT_STOP;
+        }
+
+        return Clutter.EVENT_PROPAGATE;
+    }
+
+    _ensureSelectedVisible(button) {
+        const adjustment = this._scroll.vadjustment ?? this._scroll.vscroll?.adjustment;
+        if (!adjustment)
+            return;
+        const [, buttonY] = button.get_transformed_position();
+        const [, viewportY] = this._scroll.get_transformed_position();
+        const buttonBottom = buttonY + button.get_height();
+        const viewportBottom = viewportY + this._scroll.get_height();
+        if (buttonY < viewportY)
+            adjustment.set_value(adjustment.value - (viewportY - buttonY));
+        else if (buttonBottom > viewportBottom)
+            adjustment.set_value(adjustment.value + (buttonBottom - viewportBottom));
     }
 
     _insertSelected() {
@@ -355,15 +458,6 @@ export default class EmojiPanelExtension extends Extension {
         // Like on Windows, typing right away searches.
         this._entry.grab_key_focus();
 
-        Main.wm.addKeybinding('close-panel', this._settings,
-            Meta.KeyBindingFlags.NONE, Shell.ActionMode.NORMAL,
-            () => this._hide());
-        // Enter belongs to the panel while it is open, whoever has focus, so
-        // pressing it again repeats the emoji instead of reaching the app.
-        Main.wm.addKeybinding('insert-selected', this._settings,
-            Meta.KeyBindingFlags.NONE, Shell.ActionMode.NORMAL,
-            () => this._insertSelected());
-
         // Shell chrome never sees clicks that land on windows, so watch the
         // pointer while open and close on any press outside the panel.
         this._pollId = this._timeout(50, () => {
@@ -384,8 +478,6 @@ export default class EmojiPanelExtension extends Extension {
             return;
         const searching = this._searchFocused();
         this._panel.hide();
-        Main.wm.removeKeybinding('close-panel');
-        Main.wm.removeKeybinding('insert-selected');
         if (this._pollId) {
             GLib.source_remove(this._pollId);
             this._sources.delete(this._pollId);
